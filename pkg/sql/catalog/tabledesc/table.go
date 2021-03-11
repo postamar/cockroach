@@ -177,7 +177,7 @@ func GetShardColumnName(colNames []string, buckets int32) string {
 }
 
 // GetConstraintInfo returns a summary of all constraints on the table.
-func (desc *wrapper) GetConstraintInfo() (map[string]descpb.ConstraintDetail, error) {
+func (desc *wrapper) GetConstraintInfo() (map[string]catalog.ConstraintDetail, error) {
 	return desc.collectConstraintInfo(nil)
 }
 
@@ -185,7 +185,7 @@ func (desc *wrapper) GetConstraintInfo() (map[string]descpb.ConstraintDetail, er
 // table using the provided function to fetch a TableDescriptor from an ID.
 func (desc *wrapper) GetConstraintInfoWithLookup(
 	tableLookup catalog.TableLookupFn,
-) (map[string]descpb.ConstraintDetail, error) {
+) (map[string]catalog.ConstraintDetail, error) {
 	return desc.collectConstraintInfo(tableLookup)
 }
 
@@ -200,16 +200,15 @@ func (desc *wrapper) CheckUniqueConstraints() error {
 // check that constraints have unique names.
 func (desc *wrapper) collectConstraintInfo(
 	tableLookup catalog.TableLookupFn,
-) (map[string]descpb.ConstraintDetail, error) {
-	info := make(map[string]descpb.ConstraintDetail)
+) (map[string]catalog.ConstraintDetail, error) {
+	info := make(map[string]catalog.ConstraintDetail)
 
 	// Indexes provide PK and Unique constraints that are enforced by an index.
-	for _, indexI := range desc.NonDropIndexes() {
-		index := indexI.IndexDesc()
-		if index.ID == desc.PrimaryIndex.ID {
-			if _, ok := info[index.Name]; ok {
+	for _, idx := range desc.NonDropIndexes() {
+		if idx.Primary() {
+			if _, ok := info[idx.GetName()]; ok {
 				return nil, pgerror.Newf(pgcode.DuplicateObject,
-					"duplicate constraint name: %q", index.Name)
+					"duplicate constraint name: %q", idx.GetName())
 			}
 			colHiddenMap := make(map[descpb.ColumnID]bool, len(desc.Columns))
 			for i := range desc.Columns {
@@ -220,7 +219,14 @@ func (desc *wrapper) collectConstraintInfo(
 			// This prevents the auto-created rowid primary key index from showing up
 			// in show constraints.
 			hidden := true
-			for _, id := range index.ColumnIDs {
+			detail := catalog.ConstraintDetail{
+				Kind:    catalog.ConstraintTypePK,
+				Index:   idx,
+				Columns: make([]string, idx.NumColumns()),
+			}
+			for i := range detail.Columns {
+				detail.Columns[i] = idx.GetColumnName(i)
+				id := idx.GetColumnID(i)
 				if !colHiddenMap[id] {
 					hidden = false
 					break
@@ -229,19 +235,21 @@ func (desc *wrapper) collectConstraintInfo(
 			if hidden {
 				continue
 			}
-			detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypePK}
-			detail.Columns = index.ColumnNames
-			detail.Index = index
-			info[index.Name] = detail
-		} else if index.Unique {
-			if _, ok := info[index.Name]; ok {
+			info[idx.GetName()] = detail
+		} else if idx.IsUnique() {
+			if _, ok := info[idx.GetName()]; ok {
 				return nil, pgerror.Newf(pgcode.DuplicateObject,
-					"duplicate constraint name: %q", index.Name)
+					"duplicate constraint name: %q", idx.GetName())
 			}
-			detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypeUnique}
-			detail.Columns = index.ColumnNames
-			detail.Index = index
-			info[index.Name] = detail
+			detail := catalog.ConstraintDetail{
+				Kind:    catalog.ConstraintTypeUnique,
+				Index:   idx,
+				Columns: make([]string, idx.NumColumns()),
+			}
+			for i := range detail.Columns {
+				detail.Columns[i] = idx.GetColumnName(i)
+			}
+			info[idx.GetName()] = detail
 		}
 	}
 
@@ -252,7 +260,7 @@ func (desc *wrapper) collectConstraintInfo(
 			return nil, pgerror.Newf(pgcode.DuplicateObject,
 				"duplicate constraint name: %q", uc.Name)
 		}
-		detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypeUnique}
+		detail := catalog.ConstraintDetail{Kind: catalog.ConstraintTypeUnique}
 		// Constraints in the Validating state are considered Unvalidated for this
 		// purpose.
 		detail.Unvalidated = uc.Validity != descpb.ConstraintValidity_Validated
@@ -271,7 +279,7 @@ func (desc *wrapper) collectConstraintInfo(
 			return nil, pgerror.Newf(pgcode.DuplicateObject,
 				"duplicate constraint name: %q", fk.Name)
 		}
-		detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypeFK}
+		detail := catalog.ConstraintDetail{Kind: catalog.ConstraintTypeFK}
 		// Constraints in the Validating state are considered Unvalidated for this
 		// purpose.
 		detail.Unvalidated = fk.Validity != descpb.ConstraintValidity_Validated
@@ -294,7 +302,7 @@ func (desc *wrapper) collectConstraintInfo(
 				return nil, err
 			}
 			detail.Details = fmt.Sprintf("%s.%v", other.GetName(), referencedColumnNames)
-			detail.ReferencedTable = other.TableDesc()
+			detail.ReferencedTable = other
 		}
 		info[fk.Name] = detail
 	}
@@ -304,7 +312,7 @@ func (desc *wrapper) collectConstraintInfo(
 			return nil, pgerror.Newf(pgcode.DuplicateObject,
 				"duplicate constraint name: %q", c.Name)
 		}
-		detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypeCheck}
+		detail := catalog.ConstraintDetail{Kind: catalog.ConstraintTypeCheck}
 		// Constraints in the Validating state are considered Unvalidated for this
 		// purpose.
 		detail.Unvalidated = c.Validity != descpb.ConstraintValidity_Validated

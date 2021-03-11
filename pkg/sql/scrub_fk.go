@@ -27,7 +27,7 @@ type sqlForeignKeyCheckOperation struct {
 	tableName           *tree.TableName
 	tableDesc           catalog.TableDescriptor
 	referencedTableDesc catalog.TableDescriptor
-	constraint          *descpb.ConstraintDetail
+	FK                  *descpb.ForeignKeyConstraint
 	asOf                hlc.Timestamp
 
 	colIDToRowIdx catalog.TableColMap
@@ -46,14 +46,14 @@ type sqlForeignKeyConstraintCheckRun struct {
 func newSQLForeignKeyCheckOperation(
 	tableName *tree.TableName,
 	tableDesc catalog.TableDescriptor,
-	constraint descpb.ConstraintDetail,
+	constraint catalog.ConstraintDetail,
 	asOf hlc.Timestamp,
 ) *sqlForeignKeyCheckOperation {
 	return &sqlForeignKeyCheckOperation{
 		tableName:           tableName,
 		tableDesc:           tableDesc,
-		constraint:          &constraint,
-		referencedTableDesc: tabledesc.NewBuilder(constraint.ReferencedTable).BuildImmutableTable(),
+		FK:                  constraint.FK,
+		referencedTableDesc: constraint.ReferencedTable,
 		asOf:                asOf,
 	}
 }
@@ -66,7 +66,7 @@ func (o *sqlForeignKeyCheckOperation) Start(params runParams) error {
 
 	checkQuery, _, err := nonMatchingRowQuery(
 		o.tableDesc,
-		o.constraint.FK,
+		o.FK,
 		o.referencedTableDesc,
 		false, /* limitResults */
 	)
@@ -82,12 +82,12 @@ func (o *sqlForeignKeyCheckOperation) Start(params runParams) error {
 	}
 	o.run.rows = rows
 
-	if len(o.constraint.FK.OriginColumnIDs) > 1 && o.constraint.FK.Match == descpb.ForeignKeyReference_FULL {
+	if len(o.FK.OriginColumnIDs) > 1 && o.FK.Match == descpb.ForeignKeyReference_FULL {
 		// Check if there are any disallowed references where some columns are NULL
 		// and some aren't.
 		checkNullsQuery, _, err := matchFullUnacceptableKeyQuery(
 			o.tableDesc,
-			o.constraint.FK,
+			o.FK,
 			false, /* limitResults */
 		)
 		if err != nil {
@@ -113,11 +113,11 @@ func (o *sqlForeignKeyCheckOperation) Start(params runParams) error {
 
 	// Get primary key columns not included in the FK.
 	var colIDs []descpb.ColumnID
-	colIDs = append(colIDs, o.constraint.FK.OriginColumnIDs...)
+	colIDs = append(colIDs, o.FK.OriginColumnIDs...)
 	for i := 0; i < o.tableDesc.GetPrimaryIndex().NumColumns(); i++ {
 		pkColID := o.tableDesc.GetPrimaryIndex().GetColumnID(i)
 		found := false
-		for _, id := range o.constraint.FK.OriginColumnIDs {
+		for _, id := range o.FK.OriginColumnIDs {
 			if pkColID == id {
 				found = true
 				break
@@ -144,7 +144,7 @@ func (o *sqlForeignKeyCheckOperation) Next(params runParams) (tree.Datums, error
 	details := make(map[string]interface{})
 	rowDetails := make(map[string]interface{})
 	details["row_data"] = rowDetails
-	details["constraint_name"] = o.constraint.FK.Name
+	details["constraint_name"] = o.FK.Name
 
 	// Collect the primary index values for generating the primary key
 	// pretty string.
@@ -157,7 +157,7 @@ func (o *sqlForeignKeyCheckOperation) Next(params runParams) (tree.Datums, error
 
 	// Collect all of the values fetched from the index to generate a
 	// pretty JSON dictionary for row_data.
-	for _, id := range o.constraint.FK.OriginColumnIDs {
+	for _, id := range o.FK.OriginColumnIDs {
 		idx := o.colIDToRowIdx.GetDefault(id)
 		col, err := tabledesc.FindPublicColumnWithID(o.tableDesc, id)
 		if err != nil {
@@ -168,7 +168,7 @@ func (o *sqlForeignKeyCheckOperation) Next(params runParams) (tree.Datums, error
 	for i := 0; i < o.tableDesc.GetPrimaryIndex().NumColumns(); i++ {
 		id := o.tableDesc.GetPrimaryIndex().GetColumnID(i)
 		found := false
-		for _, fkID := range o.constraint.FK.OriginColumnIDs {
+		for _, fkID := range o.FK.OriginColumnIDs {
 			if id == fkID {
 				found = true
 				break

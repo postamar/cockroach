@@ -1030,18 +1030,18 @@ func populateTableConstraints(
 		// Determine constraint kind-specific fields.
 		var err error
 		switch con.Kind {
-		case descpb.ConstraintTypePK:
+		case catalog.ConstraintTypePK:
 			oid = h.PrimaryKeyConstraintOid(db.GetID(), scName, table.GetID(), con.Index)
 			contype = conTypePKey
-			conindid = h.IndexOid(table.GetID(), con.Index.ID)
+			conindid = h.IndexOid(table.GetID(), con.Index.GetID())
 
 			var err error
-			if conkey, err = colIDArrayToDatum(con.Index.ColumnIDs); err != nil {
+			if conkey, err = colIDArrayToDatum(con.Index.IndexDesc().ColumnIDs); err != nil {
 				return err
 			}
 			condef = tree.NewDString(table.PrimaryKeyString())
 
-		case descpb.ConstraintTypeFK:
+		case catalog.ConstraintTypeFK:
 			oid = h.ForeignKeyConstraintOid(db.GetID(), scName, table.GetID(), con.FK)
 			contype = conTypeFK
 			// Foreign keys don't have a single linked index. Pick the first one
@@ -1057,9 +1057,9 @@ func populateTableConstraints(
 				// happen.
 				log.Warningf(ctx, "broken fk reference: %v", err)
 			} else if idx, ok := refConstraint.(*descpb.IndexDescriptor); ok {
-				conindid = h.IndexOid(con.ReferencedTable.ID, idx.ID)
+				conindid = h.IndexOid(con.ReferencedTable.GetID(), idx.ID)
 			}
-			confrelid = tableOid(con.ReferencedTable.ID)
+			confrelid = tableOid(con.ReferencedTable.GetID())
 			if r, ok := fkActionMap[con.FK.OnUpdate]; ok {
 				confupdtype = r
 			}
@@ -1086,21 +1086,21 @@ func populateTableConstraints(
 			}
 			condef = tree.NewDString(buf.String())
 
-		case descpb.ConstraintTypeUnique:
+		case catalog.ConstraintTypeUnique:
 			contype = conTypeUnique
 			f := tree.NewFmtCtx(tree.FmtSimple)
 			if con.Index != nil {
-				oid = h.UniqueConstraintOid(db.GetID(), scName, table.GetID(), con.Index.ID)
-				conindid = h.IndexOid(table.GetID(), con.Index.ID)
+				oid = h.UniqueConstraintOid(db.GetID(), scName, table.GetID(), con.Index.GetID())
+				conindid = h.IndexOid(table.GetID(), con.Index.GetID())
 				var err error
-				if conkey, err = colIDArrayToDatum(con.Index.ColumnIDs); err != nil {
+				if conkey, err = colIDArrayToDatum(con.Index.IndexDesc().ColumnIDs); err != nil {
 					return err
 				}
 				f.WriteString("UNIQUE (")
-				con.Index.ColNamesFormat(f)
+				con.Index.IndexDesc().ColNamesFormat(f)
 				f.WriteByte(')')
 				if con.Index.IsPartial() {
-					pred, err := schemaexpr.FormatExprForDisplay(ctx, table, con.Index.Predicate, p.SemaCtx(), tree.FmtPGCatalog)
+					pred, err := schemaexpr.FormatExprForDisplay(ctx, table, con.Index.GetPredicate(), p.SemaCtx(), tree.FmtPGCatalog)
 					if err != nil {
 						return err
 					}
@@ -1136,7 +1136,7 @@ func populateTableConstraints(
 			}
 			condef = tree.NewDString(f.CloseAndGetString())
 
-		case descpb.ConstraintTypeCheck:
+		case catalog.ConstraintTypeCheck:
 			oid = h.CheckConstraintOid(db.GetID(), scName, table.GetID(), con.CheckConstraint)
 			contype = conTypeCheck
 			if conkey, err = colIDArrayToDatum(con.CheckConstraint.ColumnIDs); err != nil {
@@ -1483,7 +1483,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-depend.html`,
 				return err
 			}
 			for _, con := range conInfo {
-				if con.Kind != descpb.ConstraintTypeFK {
+				if con.Kind != catalog.ConstraintTypeFK {
 					continue
 				}
 
@@ -1501,7 +1501,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-depend.html`,
 					// happen.
 					log.Warningf(ctx, "broken fk reference: %v", err)
 				} else if idx, ok := refConstraint.(*descpb.IndexDescriptor); ok {
-					refObjID = h.IndexOid(con.ReferencedTable.ID, idx.ID)
+					refObjID = h.IndexOid(con.ReferencedTable.GetID(), idx.ID)
 				}
 				constraintOid := h.ForeignKeyConstraintOid(db.GetID(), scName, table.GetID(), con.FK)
 
@@ -4332,13 +4332,13 @@ func (h oidHasher) CheckConstraintOid(
 }
 
 func (h oidHasher) PrimaryKeyConstraintOid(
-	dbID descpb.ID, scName string, tableID descpb.ID, pkey *descpb.IndexDescriptor,
+	dbID descpb.ID, scName string, tableID descpb.ID, pkey catalog.Index,
 ) *tree.DOid {
 	h.writeTypeTag(pKeyConstraintTypeTag)
 	h.writeDB(dbID)
 	h.writeSchema(scName)
 	h.writeTable(tableID)
-	h.writeIndex(pkey.ID)
+	h.writeIndex(pkey.GetID())
 	return h.getOid()
 }
 

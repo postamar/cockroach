@@ -441,7 +441,7 @@ func createConstraintCheckOperations(
 	// Keep only the constraints specified by the constraints in
 	// constraintNames.
 	if constraintNames != nil {
-		wantedConstraints := make(map[string]descpb.ConstraintDetail)
+		wantedConstraints := make(map[string]catalog.ConstraintDetail)
 		for _, constraintName := range constraintNames {
 			if v, ok := constraints[string(constraintName)]; ok {
 				wantedConstraints[string(constraintName)] = v
@@ -456,14 +456,14 @@ func createConstraintCheckOperations(
 	// Populate results with all constraints on the table.
 	for _, constraint := range constraints {
 		switch constraint.Kind {
-		case descpb.ConstraintTypeCheck:
+		case catalog.ConstraintTypeCheck:
 			results = append(results, newSQLCheckConstraintCheckOperation(
 				tableName,
 				tableDesc,
 				constraint.CheckConstraint,
 				asOf,
 			))
-		case descpb.ConstraintTypeFK:
+		case catalog.ConstraintTypeFK:
 			results = append(results, newSQLForeignKeyCheckOperation(
 				tableName,
 				tableDesc,

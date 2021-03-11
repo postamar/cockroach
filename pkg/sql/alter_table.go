@@ -681,13 +681,56 @@ func (n *alterTableNode) startExec(params runParams) error {
 				return pgerror.Newf(pgcode.UndefinedObject,
 					"constraint %q of relation %q does not exist", t.Constraint, n.tableDesc.Name)
 			}
-			if err := n.tableDesc.DropConstraint(
-				params.ctx,
-				name, details,
-				func(desc *tabledesc.Mutable, ref *descpb.ForeignKeyConstraint) error {
-					return params.p.removeFKBackReference(params.ctx, desc, ref)
-				}, params.ExecCfg().Settings); err != nil {
+
+			ordinal, err := n.tableDesc.CheckConstraintForDrop(name, details)
+			if err != nil {
 				return err
+			}
+
+			switch details.Kind {
+			case catalog.ConstraintTypePK:
+				primaryIndex := *n.tableDesc.GetPrimaryIndex().IndexDesc()
+				primaryIndex.Disabled = true
+				n.tableDesc.SetPrimaryIndex(primaryIndex)
+
+			case catalog.ConstraintTypeUnique:
+				ref := &n.tableDesc.UniqueWithoutIndexConstraints[ordinal]
+				// If the constraint is unvalidated, there's no assumption that it must
+				// hold for all rows, so it can be dropped immediately.
+				if ref.Validity == descpb.ConstraintValidity_Unvalidated {
+					n.tableDesc.UniqueWithoutIndexConstraints = append(
+						n.tableDesc.UniqueWithoutIndexConstraints[:ordinal],
+						n.tableDesc.UniqueWithoutIndexConstraints[ordinal+1:]...,
+					)
+					break
+				}
+				ref.Validity = descpb.ConstraintValidity_Dropping
+				n.tableDesc.AddUniqueWithoutIndexMutation(ref, descpb.DescriptorMutation_DROP)
+
+			case catalog.ConstraintTypeCheck:
+				ref := n.tableDesc.Checks[ordinal]
+				// If the constraint is unvalidated, there's no assumption that it must
+				// hold for all rows, so it can be dropped immediately.
+				if ref.Validity == descpb.ConstraintValidity_Unvalidated {
+					n.tableDesc.Checks = append(n.tableDesc.Checks[:ordinal], n.tableDesc.Checks[ordinal+1:]...)
+					break
+				}
+				ref.Validity = descpb.ConstraintValidity_Dropping
+				n.tableDesc.AddCheckMutation(ref, descpb.DescriptorMutation_DROP)
+
+			case catalog.ConstraintTypeFK:
+				ref := &n.tableDesc.OutboundFKs[ordinal]
+				// If the constraint is unvalidated, there's no assumption that it must
+				// hold for all rows, so it can be dropped immediately.
+				if ref.Validity == descpb.ConstraintValidity_Unvalidated {
+					if err := params.p.removeFKBackReference(params.ctx, n.tableDesc, ref); err != nil {
+						return err
+					}
+					n.tableDesc.OutboundFKs = append(n.tableDesc.OutboundFKs[:ordinal], n.tableDesc.OutboundFKs[ordinal+1:]...)
+					break
+				}
+				ref.Validity = descpb.ConstraintValidity_Dropping
+				n.tableDesc.AddForeignKeyMutation(ref, descpb.DescriptorMutation_DROP)
 			}
 			descriptorChanged = true
 			if err := validateDescriptor(params.ctx, params.p, n.tableDesc); err != nil {
@@ -709,7 +752,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 				continue
 			}
 			switch constraint.Kind {
-			case descpb.ConstraintTypeCheck:
+			case catalog.ConstraintTypeCheck:
 				found := false
 				var ck *descpb.TableDescriptor_CheckConstraint
 				for _, c := range n.tableDesc.Checks {
@@ -732,7 +775,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 				}
 				ck.Validity = descpb.ConstraintValidity_Validated
 
-			case descpb.ConstraintTypeFK:
+			case catalog.ConstraintTypeFK:
 				var foundFk *descpb.ForeignKeyConstraint
 				for i := range n.tableDesc.OutboundFKs {
 					fk := &n.tableDesc.OutboundFKs[i]
@@ -754,7 +797,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 				}
 				foundFk.Validity = descpb.ConstraintValidity_Validated
 
-			case descpb.ConstraintTypeUnique:
+			case catalog.ConstraintTypeUnique:
 				if constraint.Index == nil {
 					var foundUnique *descpb.UniqueWithoutIndexConstraint
 					for i := range n.tableDesc.UniqueWithoutIndexConstraints {
@@ -913,7 +956,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 			// lead to renames of the underlying index. Ensure that no index with this
 			// new name exists. This is what postgres does.
 			switch details.Kind {
-			case descpb.ConstraintTypeUnique, descpb.ConstraintTypePK:
+			case catalog.ConstraintTypeUnique, catalog.ConstraintTypePK:
 				if catalog.FindNonDropIndex(n.tableDesc, func(idx catalog.Index) bool {
 					return idx.GetName() == string(t.NewName)
 				}) != nil {

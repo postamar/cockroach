@@ -310,7 +310,7 @@ https://www.postgresql.org/docs/9.5/infoschema-check-constraints.html`,
 			scNameStr := tree.NewDString(scName)
 			for conName, con := range conInfo {
 				// Only Check constraints are included.
-				if con.Kind != descpb.ConstraintTypeCheck {
+				if con.Kind != catalog.ConstraintTypeCheck {
 					continue
 				}
 				conNameStr := tree.NewDString(conName)
@@ -727,11 +727,11 @@ CREATE TABLE information_schema.constraint_column_usage (
 				conTable := table
 				conCols := con.Columns
 				conNameStr := tree.NewDString(conName)
-				if con.Kind == descpb.ConstraintTypeFK {
+				if con.Kind == catalog.ConstraintTypeFK {
 					// For foreign key constraint, constraint_column_usage
 					// identifies the table/columns that the foreign key
 					// references.
-					conTable = tabledesc.NewBuilder(con.ReferencedTable).BuildImmutableTable()
+					conTable = con.ReferencedTable
 					conCols, err = conTable.NamesForColumnIDs(con.FK.ReferencedColumnIDs)
 					if err != nil {
 						return err
@@ -791,9 +791,9 @@ CREATE TABLE information_schema.key_column_usage (
 			for conName, con := range conInfo {
 				// Only Primary Key, Foreign Key, and Unique constraints are included.
 				switch con.Kind {
-				case descpb.ConstraintTypePK:
-				case descpb.ConstraintTypeFK:
-				case descpb.ConstraintTypeUnique:
+				case catalog.ConstraintTypePK:
+				case catalog.ConstraintTypeFK:
+				case catalog.ConstraintTypeUnique:
 				default:
 					continue
 				}
@@ -803,7 +803,7 @@ CREATE TABLE information_schema.key_column_usage (
 				for pos, col := range con.Columns {
 					ordinalPos := tree.NewDInt(tree.DInt(pos + 1))
 					uniquePos := tree.DNull
-					if con.Kind == descpb.ConstraintTypeFK {
+					if con.Kind == catalog.ConstraintTypeFK {
 						uniquePos = ordinalPos
 					}
 					if err := addRow(

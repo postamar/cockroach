@@ -308,7 +308,7 @@ type TableDescriptor interface {
 
 	ForeachDependedOnBy(f func(dep *descpb.TableDescriptor_Reference) error) error
 	GetDependsOn() []descpb.ID
-	GetConstraintInfoWithLookup(fn TableLookupFn) (map[string]descpb.ConstraintDetail, error)
+	GetConstraintInfoWithLookup(fn TableLookupFn) (map[string]ConstraintDetail, error)
 	ForeachOutboundFK(f func(fk *descpb.ForeignKeyConstraint) error) error
 	GetChecks() []*descpb.TableDescriptor_CheckConstraint
 	AllActiveAndInactiveChecks() []*descpb.TableDescriptor_CheckConstraint
@@ -316,7 +316,7 @@ type TableDescriptor interface {
 	GetUniqueWithoutIndexConstraints() []descpb.UniqueWithoutIndexConstraint
 	AllActiveAndInactiveUniqueWithoutIndexConstraints() []*descpb.UniqueWithoutIndexConstraint
 	ForeachInboundFK(f func(fk *descpb.ForeignKeyConstraint) error) error
-	GetConstraintInfo() (map[string]descpb.ConstraintDetail, error)
+	GetConstraintInfo() (map[string]ConstraintDetail, error)
 	AllActiveAndInactiveForeignKeys() []*descpb.ForeignKeyConstraint
 	GetInboundFKs() []descpb.ForeignKeyConstraint
 	GetOutboundFKs() []descpb.ForeignKeyConstraint

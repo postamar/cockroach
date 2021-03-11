@@ -19,7 +19,6 @@ go_library(
         "//pkg/geo/geoindex",
         "//pkg/keys",
         "//pkg/roachpb",
-        "//pkg/settings/cluster",
         "//pkg/sql/catalog",
         "//pkg/sql/catalog/colinfo",
         "//pkg/sql/catalog/descpb",

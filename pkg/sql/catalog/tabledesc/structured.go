@@ -18,7 +18,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -1202,8 +1201,8 @@ func (desc *wrapper) NamesForColumnIDs(ids descpb.ColumnIDs) ([]string, error) {
 }
 
 // RenameIndexDescriptor renames an index descriptor.
-func (desc *Mutable) RenameIndexDescriptor(index *descpb.IndexDescriptor, name string) error {
-	id := index.ID
+func (desc *Mutable) RenameIndexDescriptor(index catalog.Index, name string) error {
+	id := index.GetID()
 	if id == desc.PrimaryIndex.ID {
 		idx := desc.PrimaryIndex
 		idx.Name = name
@@ -1226,153 +1225,105 @@ func (desc *Mutable) RenameIndexDescriptor(index *descpb.IndexDescriptor, name s
 	return fmt.Errorf("index with id = %d does not exist", id)
 }
 
-// DropConstraint drops a constraint, either by removing it from the table
-// descriptor or by queuing a mutation for a schema change.
-func (desc *Mutable) DropConstraint(
-	ctx context.Context,
-	name string,
-	detail descpb.ConstraintDetail,
-	removeFK func(*Mutable, *descpb.ForeignKeyConstraint) error,
-	settings *cluster.Settings,
-) error {
+// CheckConstraintForDrop checks that the constraint can be dropped.
+// Returns the ordinal of the constraint in the corresponding slice when
+// applicable, 0 otherwise.
+// Returns an error iff the constraint cannot be dropped.
+func (desc *wrapper) CheckConstraintForDrop(
+	name string, detail catalog.ConstraintDetail,
+) (int, error) {
 	switch detail.Kind {
-	case descpb.ConstraintTypePK:
-		{
-			primaryIndex := desc.PrimaryIndex
-			primaryIndex.Disabled = true
-			desc.SetPrimaryIndex(primaryIndex)
-		}
-		return nil
+	case catalog.ConstraintTypePK:
+		return 0, nil
 
-	case descpb.ConstraintTypeUnique:
+	case catalog.ConstraintTypeUnique:
 		if detail.Index != nil {
-			return unimplemented.NewWithIssueDetailf(42840, "drop-constraint-unique",
+			indexName := detail.Index.GetName()
+			return 0, unimplemented.NewWithIssueDetailf(42840, "drop-constraint-unique",
 				"cannot drop UNIQUE constraint %q using ALTER TABLE DROP CONSTRAINT, use DROP INDEX CASCADE instead",
-				tree.ErrNameStringP(&detail.Index.Name))
+				tree.ErrNameStringP(&indexName))
 		}
 		if detail.UniqueWithoutIndexConstraint == nil {
-			return errors.AssertionFailedf(
+			return 0, errors.AssertionFailedf(
 				"Index or UniqueWithoutIndexConstraint must be non-nil for a unique constraint",
 			)
 		}
 		if detail.UniqueWithoutIndexConstraint.Validity == descpb.ConstraintValidity_Validating {
-			return unimplemented.NewWithIssueDetailf(42844,
+			return 0, unimplemented.NewWithIssueDetailf(42844,
 				"drop-constraint-unique-validating",
 				"constraint %q in the middle of being added, try again later", name)
 		}
 		if detail.UniqueWithoutIndexConstraint.Validity == descpb.ConstraintValidity_Dropping {
-			return unimplemented.NewWithIssueDetailf(42844,
+			return 0, unimplemented.NewWithIssueDetailf(42844,
 				"drop-constraint-unique-mutation",
 				"constraint %q in the middle of being dropped", name)
 		}
-		// Search through the descriptor's unique constraints and delete the
-		// one that we're supposed to be deleting.
-		for i := range desc.UniqueWithoutIndexConstraints {
-			ref := &desc.UniqueWithoutIndexConstraints[i]
-			if ref.Name == name {
-				// If the constraint is unvalidated, there's no assumption that it must
-				// hold for all rows, so it can be dropped immediately.
-				if detail.UniqueWithoutIndexConstraint.Validity == descpb.ConstraintValidity_Unvalidated {
-					desc.UniqueWithoutIndexConstraints = append(
-						desc.UniqueWithoutIndexConstraints[:i], desc.UniqueWithoutIndexConstraints[i+1:]...,
-					)
-					return nil
-				}
-				ref.Validity = descpb.ConstraintValidity_Dropping
-				desc.AddUniqueWithoutIndexMutation(ref, descpb.DescriptorMutation_DROP)
-				return nil
+		for i, c := range desc.UniqueWithoutIndexConstraints {
+			if c.Name == name {
+				return i, nil
 			}
 		}
-		return errors.AssertionFailedf("constraint %q not found on table %q", name, desc.Name)
 
-	case descpb.ConstraintTypeCheck:
+	case catalog.ConstraintTypeCheck:
 		if detail.CheckConstraint.Validity == descpb.ConstraintValidity_Validating {
-			return unimplemented.NewWithIssueDetailf(42844, "drop-constraint-check-mutation",
+			return 0, unimplemented.NewWithIssueDetailf(42844, "drop-constraint-check-mutation",
 				"constraint %q in the middle of being added, try again later", name)
 		}
 		if detail.CheckConstraint.Validity == descpb.ConstraintValidity_Dropping {
-			return unimplemented.NewWithIssueDetailf(42844, "drop-constraint-check-mutation",
+			return 0, unimplemented.NewWithIssueDetailf(42844, "drop-constraint-check-mutation",
 				"constraint %q in the middle of being dropped", name)
 		}
 		for i, c := range desc.Checks {
 			if c.Name == name {
-				// If the constraint is unvalidated, there's no assumption that it must
-				// hold for all rows, so it can be dropped immediately.
-				// We also drop the constraint immediately instead of queuing a mutation
-				// unless the cluster is fully upgraded to 19.2, for backward
-				// compatibility.
-				if detail.CheckConstraint.Validity == descpb.ConstraintValidity_Unvalidated {
-					desc.Checks = append(desc.Checks[:i], desc.Checks[i+1:]...)
-					return nil
-				}
-				c.Validity = descpb.ConstraintValidity_Dropping
-				desc.AddCheckMutation(c, descpb.DescriptorMutation_DROP)
-				return nil
+				return i, nil
 			}
 		}
-		return errors.Errorf("constraint %q not found on table %q", name, desc.Name)
 
-	case descpb.ConstraintTypeFK:
+	case catalog.ConstraintTypeFK:
 		if detail.FK.Validity == descpb.ConstraintValidity_Validating {
-			return unimplemented.NewWithIssueDetailf(42844,
+			return 0, unimplemented.NewWithIssueDetailf(42844,
 				"drop-constraint-fk-validating",
 				"constraint %q in the middle of being added, try again later", name)
 		}
 		if detail.FK.Validity == descpb.ConstraintValidity_Dropping {
-			return unimplemented.NewWithIssueDetailf(42844,
+			return 0, unimplemented.NewWithIssueDetailf(42844,
 				"drop-constraint-fk-mutation",
 				"constraint %q in the middle of being dropped", name)
 		}
-		// Search through the descriptor's foreign key constraints and delete the
-		// one that we're supposed to be deleting.
-		for i := range desc.OutboundFKs {
-			ref := &desc.OutboundFKs[i]
-			if ref.Name == name {
-				// If the constraint is unvalidated, there's no assumption that it must
-				// hold for all rows, so it can be dropped immediately.
-				if detail.FK.Validity == descpb.ConstraintValidity_Unvalidated {
-					// Remove the backreference.
-					if err := removeFK(desc, detail.FK); err != nil {
-						return err
-					}
-					desc.OutboundFKs = append(desc.OutboundFKs[:i], desc.OutboundFKs[i+1:]...)
-					return nil
-				}
-				ref.Validity = descpb.ConstraintValidity_Dropping
-				desc.AddForeignKeyMutation(ref, descpb.DescriptorMutation_DROP)
-				return nil
+		for i, c := range desc.OutboundFKs {
+			if c.Name == name {
+				return i, nil
 			}
 		}
-		return errors.AssertionFailedf("constraint %q not found on table %q", name, desc.Name)
 
 	default:
-		return unimplemented.Newf(fmt.Sprintf("drop-constraint-%s", detail.Kind),
+		return 0, unimplemented.Newf(fmt.Sprintf("drop-constraint-%s", detail.Kind),
 			"constraint %q has unsupported type", tree.ErrNameString(name))
 	}
-
+	return 0, errors.AssertionFailedf("constraint %q not found on table %q", name, desc.Name)
 }
 
 // RenameConstraint renames a constraint.
 func (desc *Mutable) RenameConstraint(
-	detail descpb.ConstraintDetail,
+	detail catalog.ConstraintDetail,
 	oldName, newName string,
 	dependentViewRenameError func(string, descpb.ID) error,
 	renameFK func(*Mutable, *descpb.ForeignKeyConstraint, string) error,
 ) error {
 	switch detail.Kind {
-	case descpb.ConstraintTypePK:
+	case catalog.ConstraintTypePK:
 		for _, tableRef := range desc.DependedOnBy {
-			if tableRef.IndexID != detail.Index.ID {
+			if tableRef.IndexID != detail.Index.GetID() {
 				continue
 			}
 			return dependentViewRenameError("index", tableRef.ID)
 		}
 		return desc.RenameIndexDescriptor(detail.Index, newName)
 
-	case descpb.ConstraintTypeUnique:
+	case catalog.ConstraintTypeUnique:
 		if detail.Index != nil {
 			for _, tableRef := range desc.DependedOnBy {
-				if tableRef.IndexID != detail.Index.ID {
+				if tableRef.IndexID != detail.Index.GetID() {
 					continue
 				}
 				return dependentViewRenameError("index", tableRef.ID)
@@ -1395,7 +1346,7 @@ func (desc *Mutable) RenameConstraint(
 		}
 		return nil
 
-	case descpb.ConstraintTypeFK:
+	case catalog.ConstraintTypeFK:
 		if detail.FK.Validity == descpb.ConstraintValidity_Validating {
 			return unimplemented.NewWithIssueDetailf(42844,
 				"rename-constraint-fk-mutation",
@@ -1414,7 +1365,7 @@ func (desc *Mutable) RenameConstraint(
 		fk.Name = newName
 		return nil
 
-	case descpb.ConstraintTypeCheck:
+	case catalog.ConstraintTypeCheck:
 		if detail.CheckConstraint.Validity == descpb.ConstraintValidity_Validating {
 			return unimplemented.NewWithIssueDetailf(42844,
 				"rename-constraint-check-mutation",
